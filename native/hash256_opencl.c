@@ -14,11 +14,6 @@ typedef struct {
   uint32_t hash[8];
 } Result;
 
-/* Optimized kernel:
-   - Uses local memory for challenge/difficulty to reduce global memory reads
-   - Unrolled keccak round loop hint via pragma unroll
-   - Local work size hint via reqd_work_group_size removed to let driver pick optimal
-*/
 static const char *KERNEL =
 "#pragma OPENCL EXTENSION cl_khr_int64_base_atomics : enable\n"
 "typedef struct{uint found;uint nonce_lo;uint nonce_hi;uint hash[8];} Result;\n"
@@ -28,42 +23,41 @@ static const char *KERNEL =
 "uint bswap32(uint v){return ((v&255U)<<24)|((v&65280U)<<8)|((v&16711680U)>>8)|((v&4278190080U)>>24);}\n"
 "ulong rotl64(ulong x,int s){return rotate(x,(ulong)s);}\n"
 "void keccakf(ulong st[25]){"
-"  int i,j,r;ulong t,bc[5];"
-"  #pragma unroll 24\n"
-"  for(r=0;r<24;r++){"
-"    for(i=0;i<5;i++)bc[i]=st[i]^st[i+5]^st[i+10]^st[i+15]^st[i+20];"
-"    for(i=0;i<5;i++){t=bc[(i+4)%5]^rotl64(bc[(i+1)%5],1);for(j=0;j<25;j+=5)st[j+i]^=t;}"
-"    t=st[1];for(i=0;i<24;i++){j=P[i];bc[0]=st[j];st[j]=rotl64(t,R[i]);t=bc[0];}"
-"    for(j=0;j<25;j+=5){for(i=0;i<5;i++)bc[i]=st[j+i];for(i=0;i<5;i++)st[j+i]^=(~bc[(i+1)%5])&bc[(i+2)%5];}"
-"    st[0]^=RC[r];"
-"  }"
-"}\n"
+"int i,j,r;ulong t,bc[5];"
+"for(r=0;r<24;r++){"
+"for(i=0;i<5;i++)bc[i]=st[i]^st[i+5]^st[i+10]^st[i+15]^st[i+20];"
+"for(i=0;i<5;i++){t=bc[(i+4)%5]^rotl64(bc[(i+1)%5],1);for(j=0;j<25;j+=5)st[j+i]^=t;}"
+"t=st[1];for(i=0;i<24;i++){j=P[i];bc[0]=st[j];st[j]=rotl64(t,R[i]);t=bc[0];}"
+"for(j=0;j<25;j+=5){for(i=0;i<5;i++)bc[i]=st[j+i];for(i=0;i<5;i++)st[j+i]^=(~bc[(i+1)%5])&bc[(i+2)%5];}"
+"st[0]^=RC[r];"
+"}}\n"
 "int below(uint h[8],__constant uint *d){for(int i=0;i<8;i++){if(h[i]<d[i])return 1;if(h[i]>d[i])return 0;}return 0;}\n"
-"__kernel void mine(__constant uint *challenge,__constant uint *difficulty,ulong base,__global Result *out){"
-"  size_t gid=get_global_id(0);"
-"  ulong nonce=base+(ulong)gid;"
-"  ulong st[25];"
-"  for(int i=0;i<25;i++)st[i]=0UL;"
-"  st[0]=((ulong)challenge[1]<<32)|challenge[0];"
-"  st[1]=((ulong)challenge[3]<<32)|challenge[2];"
-"  st[2]=((ulong)challenge[5]<<32)|challenge[4];"
-"  st[3]=((ulong)challenge[7]<<32)|challenge[6];"
-"  uint lo=(uint)(nonce&0xffffffffUL);"
-"  uint hi=(uint)(nonce>>32);"
-"  st[7]=((ulong)bswap32(lo)<<32)|bswap32(hi);"
-"  st[8]=1UL;st[16]=0x8000000000000000UL;"
-"  keccakf(st);"
-"  uint h[8];"
-"  h[0]=bswap32((uint)(st[0]&0xffffffffUL));h[1]=bswap32((uint)(st[0]>>32));"
-"  h[2]=bswap32((uint)(st[1]&0xffffffffUL));h[3]=bswap32((uint)(st[1]>>32));"
-"  h[4]=bswap32((uint)(st[2]&0xffffffffUL));h[5]=bswap32((uint)(st[2]>>32));"
-"  h[6]=bswap32((uint)(st[3]&0xffffffffUL));h[7]=bswap32((uint)(st[3]>>32));"
-"  if(below(h,difficulty)){"
-"    if(atomic_cmpxchg((volatile __global unsigned int *)&out->found,0U,1U)==0U){"
-"      out->nonce_lo=lo;out->nonce_hi=hi;"
-"      for(int i=0;i<8;i++)out->hash[i]=h[i];"
-"    }"
-"  }"
+"__kernel __attribute__((reqd_work_group_size(256,1,1)))\n"
+"void mine(__constant uint *challenge,__constant uint *difficulty,ulong base,__global Result *out){"
+"size_t gid=get_global_id(0);"
+"ulong nonce=base+(ulong)gid;"
+"ulong st[25];"
+"for(int i=0;i<25;i++)st[i]=0UL;"
+"st[0]=((ulong)challenge[1]<<32)|challenge[0];"
+"st[1]=((ulong)challenge[3]<<32)|challenge[2];"
+"st[2]=((ulong)challenge[5]<<32)|challenge[4];"
+"st[3]=((ulong)challenge[7]<<32)|challenge[6];"
+"uint lo=(uint)(nonce&0xffffffffUL);"
+"uint hi=(uint)(nonce>>32);"
+"st[7]=((ulong)bswap32(lo)<<32)|bswap32(hi);"
+"st[8]=1UL;st[16]=0x8000000000000000UL;"
+"keccakf(st);"
+"uint h[8];"
+"h[0]=bswap32((uint)(st[0]&0xffffffffUL));h[1]=bswap32((uint)(st[0]>>32));"
+"h[2]=bswap32((uint)(st[1]&0xffffffffUL));h[3]=bswap32((uint)(st[1]>>32));"
+"h[4]=bswap32((uint)(st[2]&0xffffffffUL));h[5]=bswap32((uint)(st[2]>>32));"
+"h[6]=bswap32((uint)(st[3]&0xffffffffUL));h[7]=bswap32((uint)(st[3]>>32));"
+"if(below(h,difficulty)){"
+"if(atomic_cmpxchg((volatile __global unsigned int *)&out->found,0U,1U)==0U){"
+"out->nonce_lo=lo;out->nonce_hi=hi;"
+"for(int i=0;i<8;i++)out->hash[i]=h[i];"
+"}"
+"}"
 "}\n";
 
 static int hex_nibble(char c) {
@@ -112,9 +106,8 @@ int main(int argc, char **argv) {
 
   size_t batch = (size_t)strtoull(argv[3], NULL, 10);
   if (batch < 65536) batch = 65536;
-  batch = (batch / 64) * 64;
+  batch = (batch / 256) * 256; /* align to work group size 256 */
 
-  /* GPU index — default 0, override via 4th arg */
   int gpu_index = (argc >= 5) ? atoi(argv[4]) : 0;
 
   uint32_t challenge[8], difficulty[8];
@@ -124,46 +117,33 @@ int main(int argc, char **argv) {
   }
 
   cl_int err;
-
-  /* Enumerate all platforms and all GPU devices */
   cl_platform_id platforms[8];
   cl_uint num_platforms = 0;
   clGetPlatformIDs(8, platforms, &num_platforms);
 
   cl_device_id all_devices[16];
   cl_uint total_devices = 0;
-
   for (cl_uint p = 0; p < num_platforms; p++) {
     cl_device_id devs[16];
     cl_uint n = 0;
     if (clGetDeviceIDs(platforms[p], CL_DEVICE_TYPE_GPU, 16, devs, &n) == CL_SUCCESS) {
-      for (cl_uint d = 0; d < n && total_devices < 16; d++) {
+      for (cl_uint d = 0; d < n && total_devices < 16; d++)
         all_devices[total_devices++] = devs[d];
-      }
     }
   }
 
-  if (total_devices == 0) {
-    fprintf(stderr, "No GPU devices found\n");
-    return 1;
-  }
-
+  if (total_devices == 0) { fprintf(stderr, "No GPU devices found\n"); return 1; }
   if (gpu_index >= (int)total_devices) {
     fprintf(stderr, "gpu_index %d out of range (found %u GPUs)\n", gpu_index, total_devices);
     return 1;
   }
 
   cl_device_id device = all_devices[gpu_index];
-
-  /* Print device name for logging */
   char devname[128] = {0};
   clGetDeviceInfo(device, CL_DEVICE_NAME, sizeof(devname), devname, NULL);
   fprintf(stderr, "GPU[%d]: %s\n", gpu_index, devname);
 
-  /* Query optimal work group size */
-  size_t max_wg = 256;
-  clGetDeviceInfo(device, CL_DEVICE_MAX_WORK_GROUP_SIZE, sizeof(max_wg), &max_wg, NULL);
-  if (max_wg > 256) max_wg = 256;
+  size_t local_size = 256;
 
   cl_context context = clCreateContext(NULL, 1, &device, NULL, NULL, &err);
   CHECK_CL(err, "clCreateContext");
@@ -172,10 +152,9 @@ int main(int argc, char **argv) {
   cl_program program = clCreateProgramWithSource(context, 1, &KERNEL, NULL, &err);
   CHECK_CL(err, "clCreateProgramWithSource");
 
-  /* Build with optimizations */
-  err = clBuildProgram(program, 1, &device, "-cl-fast-relaxed-math -cl-mad-enable", NULL, NULL);
+  err = clBuildProgram(program, 1, &device, "-cl-fast-relaxed-math -cl-mad-enable -cl-nv-verbose", NULL, NULL);
   if (err != CL_SUCCESS) {
-    char log[8192];
+    char log[16384];
     clGetProgramBuildInfo(program, device, CL_PROGRAM_BUILD_LOG, sizeof(log), log, NULL);
     fprintf(stderr, "%s\n", log);
     return 1;
@@ -184,7 +163,6 @@ int main(int argc, char **argv) {
   cl_kernel kernel = clCreateKernel(program, "mine", &err);
   CHECK_CL(err, "clCreateKernel");
 
-  /* Use __constant buffers for challenge/difficulty */
   cl_mem challenge_buf = clCreateBuffer(context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, sizeof(challenge), challenge, &err);
   CHECK_CL(err, "challenge buffer");
   cl_mem difficulty_buf = clCreateBuffer(context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, sizeof(difficulty), difficulty, &err);
@@ -193,7 +171,8 @@ int main(int argc, char **argv) {
   cl_mem result_buf = clCreateBuffer(context, CL_MEM_READ_WRITE, sizeof(result), NULL, &err);
   CHECK_CL(err, "result buffer");
 
-  uint64_t base = ((uint64_t)time(NULL) << 32) ^ (uint64_t)clock() ^ ((uint64_t)gpu_index * 0x100000000ULL);
+  /* Spread nonce space across GPUs using gpu_index offset */
+  uint64_t base = ((uint64_t)time(NULL) << 32) ^ ((uint64_t)gpu_index * 0x9e3779b97f4a7c15ULL);
   uint64_t total = 0;
   clock_t started = clock();
 
@@ -204,7 +183,7 @@ int main(int argc, char **argv) {
     CHECK_CL(clSetKernelArg(kernel, 1, sizeof(cl_mem), &difficulty_buf), "arg1");
     CHECK_CL(clSetKernelArg(kernel, 2, sizeof(uint64_t), &base), "arg2");
     CHECK_CL(clSetKernelArg(kernel, 3, sizeof(cl_mem), &result_buf), "arg3");
-    CHECK_CL(clEnqueueNDRangeKernel(queue, kernel, 1, NULL, &batch, &max_wg, 0, NULL, NULL), "enqueue");
+    CHECK_CL(clEnqueueNDRangeKernel(queue, kernel, 1, NULL, &batch, &local_size, 0, NULL, NULL), "enqueue");
     CHECK_CL(clFinish(queue), "finish");
     CHECK_CL(clEnqueueReadBuffer(queue, result_buf, CL_TRUE, 0, sizeof(result), &result, 0, NULL, NULL), "read result");
 
@@ -220,7 +199,8 @@ int main(int argc, char **argv) {
 
     double seconds = (double)(clock() - started) / CLOCKS_PER_SEC;
     if (seconds > 0.5) {
-      printf("{\"type\":\"progress\",\"hashes\":\"%llu\",\"hashrate\":%.0f}\n", (unsigned long long)total, total / seconds);
+      printf("{\"type\":\"progress\",\"hashes\":\"%llu\",\"hashrate\":%.0f}\n",
+             (unsigned long long)total, total / seconds);
       fflush(stdout);
       started = clock();
       total = 0;
